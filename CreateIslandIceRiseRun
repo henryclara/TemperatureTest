@@ -1,0 +1,279 @@
+#!/bin/bash
+# This script generates run scripts and directories for synthetic ice rise
+# simulations, starting from an ice-shelf with a grounded, cut-off Gaussian bump
+# in 02.07.2020 CS
+###############################################################################
+#### START OF USER INTERFACE !!! ##############################################
+###############################################################################
+###############################################################################
+##### Load required subscripts with necessary functions #######################
+###############################################################################
+. IslandIceRiseFunctions.sh
+. IslandIceRiseFunctionsPS.sh
+#. ModulesPlusPaths.sh #I don't think this is needed
+###############################################################################
+##### Mesh & Domain Info ######################################################
+###############################################################################
+DomLength=60000 # in meters
+DomWidth=60000 # in meters
+BackgroundRes=2000 # in meters
+MaxRes=350 # in meters
+RefineRadius=5000 # in meters
+VertMeshLayers=10 # number of vertical layers
+RemeshingDirName=Remesh # name of remeshing direcotry
+RemeshSif=IceRiseRemesh.sif # name of the remesh sif file
+###############################################################################
+##### Ice geometry parameters #################################################
+###############################################################################
+BumpHeight=500.0 # height of the (now flattened) gaussian bump
+BedTopoInit=-580.0
+ZbInit=-270.0 
+ZsInit=30.0
+xCenter=40000.0 # center of gaussian bump in x-direction
+yCenter=0.0 # center of gaussian bump in y-direction
+Sigmax=8000.0 # length of the gaussian bump
+Sigmay=8000.0 # width of the gaussian bump
+RiseIntoShelf=50.0 # height the bedrock bump inpinges onto the ice shelf
+Incline=0.0 # incline of the bed underneath the ice rise
+InclineShelf=0.0 # incline of the bed underneath the ice shelf
+###############################################################################
+##### Ice flow parameters #####################################################
+###############################################################################
+rhoi=900.0 # ice density
+rhow=1000.0 # ocean density
+RateFactor=4.6e-25 # maybe Pa m s^-2
+GlenExponent=3.0
+BasalFrictionCoeff=7.624e7  # originally: 7.624e6, also used 1.906e6, 3.812e6
+SlidingLaw=CubicWeertman #choose between LinearWeertman,CubicWeertman,and
+#LinearCoulomb, CubicColoumb
+#For LinearCoulomb, stress solver is needed.
+IceTemp=-15.0
+###############################################################################
+##### Boundary forcing parameters #############################################
+###############################################################################
+SMB=1.2 # this parameter should roughly equal what amount of ice is lost through
+#the increase in outflow at the calving front. Based on freely flowing ice shelf
+#and equation 6.84 in Greve and Blatter(2009).
+# BMBParameters, BMB parameterisation is based on Favier et al. (2016) in TC or
+# alternatively Schannwell et al. (2019) in TC.
+Alpha=0.76 #tuning parameter which scales the BMB rates everywhere
+G=0.02 # melting away from GL relative to H^alpha
+A=0.04 # melting near GL relative to H^alpha
+rho=5000.0 # transition distance GL to ambient
+#BMB=0.0  This is currently not needed anymore as BMB is computed in USF as a
+#function of distance to the GL. 
+VelInitBack=300 #initial velocity at the upstream inflow Boundary (vertically
+#constant)
+#Flux=$(($VelInitBack*($ZsInit-ZbInit)))
+Flux=90000
+#echo $Flux
+###############################################################################
+##### Velocity solver selection ###############################################
+VelSolverSetUp=Mumps # options are either PS or Mumps
+###############################################################################
+SuperComputer=Mistral # choose between Mistral and Supermuc
+###############################################################################
+###############################################################################
+###############################################################################
+###############################################################################
+##### Forward simulation information for sif file #############################
+###############################################################################
+InitDirName=Init
+InitSifName=Init.sif
+InitOutputName=Forward
+ForwardDirName=Forward
+ForwardSifName=Forward.sif
+ForwardOutputName=Forward
+TimeStepSize=0.5 # (keep the same for short sim)
+OutputInterval=1 # 1 (for short sim, originally 50)
+TotalSimLength=2 # 10 (for short sim, originally 1000)
+LengthOfSingleSimulation=50 # 10 (for short sim)
+NoOfTimeSteps=$(echo "scale=1; $LengthOfSingleSimulation/$TimeStepSize" | bc -l)
+#echo $TimeStepSize
+###############################################################################
+##### Forward simulation information for submit script ########################
+###############################################################################
+ProcNo=80 # has to be multiple of 48 when running on Supermuc. On Mistral this
+#does not matter
+Procx=10
+Procy=8 # 
+Procz=1 # product of Procx*Procy * Procz = ProcNo
+Queue=test #options are: micro, test, and general. Check on LRZ webpage for
+#what the requirements are for the respective queues. If you are running on
+#Mistral this Parameter will be automatically overwritten to compute,compute2
+#need to be allocated for the job
+#echo $NoOfNodes
+RunTimeInit=00:20:00
+JobNameInit=IceRiseInit
+RunTimeForward=08:00:00
+JobName=IceRiseForward
+#Email=clara.henry@mpimet.mpg.de # comment out if no email notification
+#is wanted
+###############################################################################
+##### Set up directory structure for the run ##################################
+###############################################################################
+BaseDir=/work/bm1164/m300832/TemperatureTest/SyntheticExperiments/ # this path is the
+#directory under which the run will be writtensh 
+RunDirName=Test2D
+#this variable is the name of the run directory. Change to whatever you like!
+###############################################################################
+#### END OF USER INTERFACE !!! ################################################
+###############################################################################
+SourceDir=$PWD
+BaseRunDir=${BaseDir}/$RunDirName
+RemeshDir=${BaseRunDir}/${RemeshingDirName}
+InitDir=${BaseRunDir}/${InitDirName}
+ForwardDir=${BaseRunDir}/${ForwardDirName}
+###############################################################################
+# Check which supercomputer we are running on #################################
+###############################################################################
+###############################################################################
+if [ "$SuperComputer" = "Mistral" ]; then
+    echo "We are on Mistral"
+    Queue=compute,compute2
+    NoOfNodes=2
+elif [ "$SuperComputer" = "Supermuc" ]; then
+    echo "We are on Supmermuc"
+    CPUsOnSingleNode=48 #this number is correct for Supermuc. May be different for other systems
+    NoOfNodes=$(( $ProcNo / $CPUsOnSingleNode )) # Computes the number of nodes that
+    CheckNodeNumberConsistency $ProcNo $CPUsOnSingleNode
+    CheckCPUNumberConsistency $ProcNo $Procx $Procy $Procz
+else
+	echo "Invalid Supercomputer platform. Choose between Mistral or Supermuc"
+	echo "Exiting ..."
+	exit 1
+fi
+###############################################################################
+# Check which sliding law should be used ######################################
+###############################################################################
+###############################################################################
+if [ "$SlidingLaw" = "LinearWeertman" ]; then
+    echo "Doing Linear Weertman"
+    SlidStr=Weertman
+    SlidExp=1.0
+
+elif [ "$SlidingLaw" = "CubicWeertman" ]; then
+    SlidStr=Weertman
+    SlidExp=3.0
+
+elif [ "$SlidingLaw" = "LinearCoulomb" ]; then
+    echo "Doing Linear Coulomb"
+    SlidStr=Coulomb
+    SlidExp=1.0
+elif [ "$SlidingLaw" = "CubicCoulomb" ]; then
+    SlidStr=Coulomb
+    SlidExp=3.0
+else
+	echo "Invalid sliding law specified. Choose between
+    LinearWeertman,CubicWeertman,LinearCoulomb, or CubicCoulomb"
+	echo "Exiting ..."
+	exit 1
+fi
+###############################################################################
+###############################################################################
+###############################################################################
+mkdir -p ${BaseRunDir}
+mkdir -p ${RemeshDir}
+mkdir -p ${InitDir}
+mkdir -p ${InitDir}/Mesh
+mkdir -p ${ForwardDir}
+mkdir -p ${ForwardDir}/Mesh
+###############################################################################
+##### Copy Elmer path files to all directories  ###############################
+###############################################################################
+cp ModulesPlusPaths${SuperComputer}.sh $RemeshDir
+cp ModulesPlusPaths${SuperComputer}.sh $InitDir
+cp ModulesPlusPaths${SuperComputer}.sh $ForwardDir
+cd ${RemeshDir}
+###############################################################################
+##### Generate all input files (e.g sif and submit files) for remeshing stage #
+###############################################################################
+CreateMeshGeoRectangleInit $DomLength $DomWidth $BackgroundRes
+CreateMakefileRemeshInit $RemeshSif
+CreateElmerSifRemeshInit $RemeshSif $BumpHeight $Sigmax $Sigmay $xCenter \
+$yCenter $ZsInit $ZbInit $BedTopoInit $RiseIntoShelf $BackgroundRes $MaxRes \
+$RefineRadius $Incline $InclineShelf $Alpha $G $A $rho
+CreateSLURMSubmitScriptRemeshInit $RemeshDir $InitDir $ForwardDir \
+$SuperComputer $Email 
+#CopyFiles2Source /hppfs/work/pn56pe/di36hov3/IslandIceRise/src
+CopyFiles2Source ${SourceDir}/src
+###############################################################################
+##### Generate all input files (e.g sif and submit files) for initial forward #
+##### stage ###################################################################
+###############################################################################
+cd ${InitDir}
+
+#CopyFiles2Source /hppfs/work/pn56pe/di36hov3/IslandIceRise/src
+CopyFiles2Source ${SourceDir}/src
+CreateMakefileForwardInit $InitSifName $Procx $Procy $Procz $ProcNo $SuperComputer
+if [ "$VelSolverSetUp" = "Mumps" ]; then
+	CreateElmerSifForwardInit $InitSifName $BumpHeight $Sigmax $Sigmay $xCenter \
+	$yCenter $ZsInit $ZbInit $BedTopoInit $RiseIntoShelf $VertMeshLayers \
+	$rhoi $rhow $RateFactor $GlenExponent $BasalFrictionCoeff $SMB \
+	$Flux $InitOutputName $IceTemp $Incline $InclineShelf $Alpha $G $A $rho \
+    $SlidStr $SlidExp
+elif [ "$VelSolverSetUp" = "PS" ]; then
+	CreateElmerSifForwardInitPS $InitSifName $BumpHeight $Sigmax $Sigmay $xCenter \
+	$yCenter $ZsInit $ZbInit $BedTopoInit $RiseIntoShelf $VertMeshLayers \
+	$rhoi $rhow $RateFactor $GlenExponent $BasalFrictionCoeff $SMB \
+	$Flux $InitOutputName $IceTemp $Incline $InclineShelf $Alpha $G $A $rho \
+    $SlidStr $SlidExp
+else
+	echo "Invalid Velocity solver setup. Choose between PS or Mumps"
+	echo "Exiting ..."
+	exit 1
+fi
+
+CreateSLURMSubmitScriptForwardInit $InitDir $NoOfNodes $ProcNo $Queue $RunTimeInit \
+$JobNameInit $LengthOfSingleSimulation $TotalSimLength 1 $ForwardDir \
+$SuperComputer $Email
+###############################################################################
+##### Generate all input files (e.g sif and submit files) for long forward #
+##### stage ###################################################################
+###############################################################################
+cd ${ForwardDir}
+#CopyFiles2Source /hppfs/work/pn56pe/di36hov3/IslandIceRise/src
+CopyFiles2Source ${SourceDir}/src
+#CopyFiles2Source /hppfs/work/pn56pe/di36hov3/IslandIceRise/src
+CreateMakefileForwardInit $ForwardSifName $Procx $Procy $Procz $ProcNo
+if [ "$VelSolverSetUp" = "Mumps" ]; then
+	CreateElmerSifForward $ForwardSifName $VertMeshLayers $rhoi $rhow \
+				$RateFactor $GlenExponent $BasalFrictionCoeff $IceTemp $SMB \
+				$Flux $ForwardOutputName $InitOutputName $NoOfTimeSteps \
+				$OutputInterval $TimeStepSize $Alpha $G $A $rho $SlidStr \
+                $SlidExp
+elif [ "$VelSolverSetUp" = "PS" ]; then
+	CreateElmerSifForwardPS $ForwardSifName $VertMeshLayers $rhoi $rhow \
+				$RateFactor $GlenExponent $BasalFrictionCoeff $IceTemp $SMB \
+				$Flux $ForwardOutputName $InitOutputName $NoOfTimeSteps \
+				$OutputInterval $TimeStepSize $Alpha $G $A $rho $SlidStr \
+                $SlidExp
+else
+	echo "Invalid Velocity solver setup. Choose between PS or Mumps"
+	echo "Exiting ..."
+	exit 1
+fi
+
+echo $JobName
+CreateSLURMSubmitScriptForward $ForwardDir $NoOfNodes $ProcNo $Queue \
+				$RunTimeForward $JobName $LengthOfSingleSimulation $TotalSimLength \
+				$ForwardSifName $SuperComputer $Email
+#$JobNameInit $LengthOfSingleSimulation $TotalSimLength 1 $ForwardDir 
+#CreateSLURMSubmitScriptForward $ForwardDir $NoOfNodes $ProcNo $Queue \
+#$RunTimeForward $JobName $ForwarSifName 
+
+###############################################################################
+##### Start recursive submission of Job scripts ###############################
+###############################################################################
+cd ${RemeshDir}
+sbatch Submit.sh
+###############################################################################
+##### THE END #################################################################
+###############################################################################
+
+
+
+
+
+
+
